@@ -20,12 +20,10 @@ public class StringMethods extends Model {
         IO.println("\nДоступные команды:");
         IO.println("1. Вывести список таблиц из MySQL.");
         IO.println("2. Создать новую таблицу в MySQL.");
-        IO.println("3. Ввести две строки с клавиатуры (не менее 50 символов каждая), результат сохранить в MySQL.");
-        IO.println("4. Вывести на экран две введенных ранее строки.");
-        IO.println("5. Вернуть подстроку по индексам (substring()), результат сохранить в MySQL.");
-        IO.println("6. Перевести все строки в верхний и нижний регистры, результат сохранить в MySQL.");
-        IO.println("7. Найти подстроку и определить: заканчивается ли строка данной подстрокой (endsWith()), результат сохранить в MySQL.");
-        IO.println("8. Экспортировать данные из MySQL в Excel и вывести на экран.");
+        IO.println("3. Возвращение подстроки по индексам, результат сохранить в MySQL с последующим выводом в консоль.");
+        IO.println("4. Перевод строк в верхний и нижний регистры, результат сохранить в MySQL с последующим выводом в консоль.");
+        IO.println("5. Поиск подстроки и определение окончания строки, результат сохранить в MySQL с последующим выводом в консоль.");
+        IO.println("6. Сохранить все данные (вышеполученные результаты) из MySQL в Excel и вывести на экран.");
     }
 
     @Override
@@ -34,12 +32,10 @@ public class StringMethods extends Model {
         switch (command) {
             case "1" -> showTables(connection);
             case "2" -> createTable(connection, "TEXT");
-            case "3" -> inputTwoStrings(connection);
-            case "4" -> displayTwoStrings(connection);
-            case "5" -> extractSubstring(connection);
-            case "6" -> convertStringCase(connection);
-            case "7" -> searchSubstringAndCheckEnding(connection);
-            case "8" -> saveToExcel(connection);
+            case "3" -> extractSubstring(connection);
+            case "4" -> convertStringCase(connection);
+            case "5" -> searchSubstringAndCheckEnding(connection);
+            case "6" -> saveToExcel(connection);
             default -> IO.println("Неверный номер команды. Попробуйте снова.");
         }
     }
@@ -51,8 +47,7 @@ public class StringMethods extends Model {
         secondString = readStringWithMinLength("вторую", MIN_STRING_LENGTH);
 
         IO.println("\nСтроки успешно введены:");
-        IO.println("Первая строка: " + firstString);
-        IO.println("Вторая строка: " + secondString);
+        showStoredStrings();
 
         finishQuery(connection, firstString, "Первая строка: " + firstString);
         finishQuery(connection, secondString, "Вторая строка: " + secondString);
@@ -69,26 +64,43 @@ public class StringMethods extends Model {
         return input;
     }
 
-    private void displayTwoStrings(Connection connection) throws RuntimeException {
-        if (!checkStringsAvailable()) {
-            return;
+    private boolean ensureStringsPrepared(Connection connection) throws RuntimeException {
+        if (firstString == null || secondString == null) {
+            IO.println("\nДля выполнения операции необходимо задать две строки.");
+            inputTwoStrings(connection);
+            return firstString != null && secondString != null;
         }
 
-        IO.println("\nДве введенных ранее строки:");
-        IO.println("Первая строка: " + firstString);
-        IO.println("Вторая строка: " + secondString);
+        while (true) {
+            String answer = IO.readln("\nИспользовать ранее введенные строки? (Y/n): ").trim();
+
+            if (answer.isEmpty()
+                || answer.equalsIgnoreCase("y")
+                || answer.equalsIgnoreCase("yes")
+            ) {
+                IO.println("\nТекущие строки:");
+                showStoredStrings();
+                return true;
+            }
+
+            if (answer.equalsIgnoreCase("n") || answer.equalsIgnoreCase("no")) {
+                inputTwoStrings(connection);
+                return firstString != null && secondString != null;
+            }
+
+            IO.println("Введите 'Y' или 'N'.");
+        }
     }
 
-    private boolean checkStringsAvailable() {
-        if (firstString == null || secondString == null) {
-            IO.println("Ошибка: необходимо сначала ввести две строки (команда 3).");
-            return false;
+    private void showStoredStrings() {
+        if (firstString != null && secondString != null) {
+            IO.println("Первая строка: " + firstString);
+            IO.println("Вторая строка: " + secondString);
         }
-        return true;
     }
 
     private void extractSubstring(Connection connection) throws RuntimeException {
-        if (!checkStringsAvailable()) {
+        if (!ensureStringsPrepared(connection)) {
             return;
         }
 
@@ -124,7 +136,7 @@ public class StringMethods extends Model {
     }
 
     private void convertStringCase(Connection connection) throws RuntimeException {
-        if (!checkStringsAvailable()) {
+        if (!ensureStringsPrepared(connection)) {
             return;
         }
 
@@ -146,7 +158,7 @@ public class StringMethods extends Model {
     }
 
     private void searchSubstringAndCheckEnding(Connection connection) throws RuntimeException {
-        if (!checkStringsAvailable()) {
+        if (!ensureStringsPrepared(connection)) {
             return;
         }
 
