@@ -8,9 +8,20 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import java.io.FileOutputStream;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 public abstract class Model {
     protected final ArrayList<SavedQuery> savedQueries_ = new ArrayList<>();
+    private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("^[A-Za-z][A-Za-z0-9_]{0,62}$");
+    private static final Set<String> ALLOWED_RESULT_COLUMN_TYPES = Set.of(
+        "CHAR", "VARCHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+        "DOUBLE", "FLOAT", "DECIMAL", "NUMERIC",
+        "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT", "BIT"
+    );
+    private static final Set<String> NUMERIC_COLUMN_TYPES = Set.of(
+        "BIGINT", "INT", "INTEGER", "SMALLINT", "MEDIUMINT", "TINYINT"
+    );
 
     public abstract String getDescribeMessage();
     public abstract void showCommands();
@@ -47,9 +58,29 @@ public abstract class Model {
         }
     }
 
+    private String readIdentifier(String prompt) {
+        while (true) {
+            String candidate = IO.readln(prompt).trim();
+
+            if (candidate.isEmpty()) {
+                IO.println("Название не может быть пустым.");
+                continue;
+            }
+
+            if (!IDENTIFIER_PATTERN.matcher(candidate).matches()) {
+                IO.println(
+                    "Допустимы латинские буквы, цифры и '_'. Первый символ — буква, длина до 63."
+                );
+                continue;
+            }
+
+            return candidate;
+        }
+    }
+
     void createTable(Connection connection, String resultType) {
-        String tableName = IO.readln("\nВведите название новой таблицы: ");
-        String query = "CREATE TABLE IF NOT EXISTS " + tableName
+        String tableName = readIdentifier("\nВведите название новой таблицы: ");
+        String query = "CREATE TABLE IF NOT EXISTS `" + tableName + "` "
             + "(id int AUTO_INCREMENT PRIMARY KEY, result " + resultType + ")";
 
         try (Statement statement = connection.createStatement()) {
@@ -65,20 +96,60 @@ public abstract class Model {
     private String chooseTableToSave(Connection connection, String result) throws RuntimeException {
         ArrayList<String> possibleTablesToSave = findCorrectTables(connection);
 
-        if (possibleTablesToSave.isEmpty()) {
-            IO.println("Нет доступных таблиц для сохранения.");
+        return chooseTableFromList(
+            possibleTablesToSave,
+            "Нет доступных таблиц для сохранения.",
+            "\nВыберите таблицу для сохранения результата `" + result + "`:"
+        );
+    }
+
+    private String chooseTableFromList(
+        ArrayList<String> tables,
+        String emptyMessage,
+        String header
+    ) {
+        if (tables.isEmpty()) {
+            IO.println(emptyMessage);
             return null;
         }
 
-        IO.println("\nВыберите таблицу для сохранения результата `" + result + "`:");
-
-        for (int i = 0; i < possibleTablesToSave.size(); ++i) {
-            IO.println((i + 1) + ". " + possibleTablesToSave.get(i));
+        IO.println(header);
+        for (int i = 0; i < tables.size(); ++i) {
+            IO.println((i + 1) + ". " + tables.get(i));
         }
 
-        int tableNum = Integer.parseInt(IO.readln("\nВведите номер таблицы: ")) - 1;
+        while (true) {
+            String answer = IO.readln("\nВведите номер таблицы: ").trim();
+            try {
+                int index = Integer.parseInt(answer) - 1;
+                if (index >= 0 && index < tables.size()) {
+                    return tables.get(index);
+                }
+                IO.println("Ошибка: номер таблицы вне допустимого диапазона.");
+            } catch (NumberFormatException e) {
+                IO.println("Ошибка: необходимо ввести целое число из списка.");
+            }
+        }
+    }
 
-        return possibleTablesToSave.get(tableNum);
+    private ArrayList<String> findAllTables(Connection connection) throws RuntimeException {
+        ArrayList<String> tablesList = new ArrayList<>();
+
+        try {
+            DatabaseMetaData metaData = connection.getMetaData();
+            try (
+                ResultSet tables =
+                    metaData.getTables(connection.getCatalog(), null, "%", new String[]{"TABLE"})
+            ) {
+                while (tables.next()) {
+                    tablesList.add(tables.getString("TABLE_NAME"));
+                }
+            }
+            return tablesList;
+        } catch (SQLException e) {
+            System.err.println("Невозможно получить список таблиц.");
+            throw new RuntimeException(e);
+        }
     }
 
     private ArrayList<String> findCorrectTables(Connection connection) throws RuntimeException {
@@ -118,17 +189,20 @@ public abstract class Model {
         throws RuntimeException
     {
         try (ResultSet primaryKeys = metaData.getPrimaryKeys(null, null, tableName)) {
-            boolean answer = false;
-
-            if (primaryKeys.next()) {
+            while (primaryKeys.next()) {
                 String pkColumn = primaryKeys.getString("COLUMN_NAME");
-                ResultSet columns = metaData.getColumns(null, null, tableName, pkColumn);
-                if (columns.next()) {
-                    answer = "YES".equals(columns.getString("IS_AUTOINCREMENT"));
+                try (ResultSet columns = metaData.getColumns(null, null, tableName, pkColumn)) {
+                    if (columns.next()) {
+                        String isAutoIncrement = columns.getString("IS_AUTOINCREMENT");
+                        String typeName = columns.getString("TYPE_NAME");
+                        if ("YES".equalsIgnoreCase(isAutoIncrement) && isNumericType(typeName)) {
+                            return true;
+                        }
+                    }
                 }
             }
 
-            return answer;
+            return false;
         } catch (SQLException e) {
             System.err.println("Невозможно получить первичные ключи.");
             throw new RuntimeException(e);
@@ -137,28 +211,16 @@ public abstract class Model {
 
     private boolean hasCorrectResultColumn(DatabaseMetaData metaData, String tableName) {
         try (ResultSet columns = metaData.getColumns(null, null, tableName, "result")) {
-            boolean answer = false;
-
             while (columns.next()) {
                 String columnName = columns.getString("COLUMN_NAME");
                 String typeName = columns.getString("TYPE_NAME");
-                String isNullable = columns.getString("IS_NULLABLE");
-                String columnDefault = columns.getString("COLUMN_DEF");
 
-                boolean isStringType = typeName.toUpperCase().contains("CHAR")
-                    || typeName.toUpperCase().contains("TEXT");
-
-                boolean isPrimaryKey = isPrimaryKeyColumn(metaData, tableName, columnName);
-
-                if (isStringType && !isPrimaryKey) {
-                    if ("YES".equals(isNullable) || columnDefault != null) {
-                        answer = true;
-                        break;
-                    }
+                if (isAllowedResultColumn(typeName) && !isPrimaryKeyColumn(metaData, tableName, columnName)) {
+                    return true;
                 }
             }
 
-            return answer;
+            return false;
         } catch (SQLException e) {
             System.err.println("Невозможно получить нужные столбцы.");
             throw new RuntimeException(e);
@@ -180,8 +242,16 @@ public abstract class Model {
         }
     }
 
+    private boolean isAllowedResultColumn(String typeName) {
+        return typeName != null && ALLOWED_RESULT_COLUMN_TYPES.contains(typeName.toUpperCase());
+    }
+
+    private boolean isNumericType(String typeName) {
+        return typeName != null && NUMERIC_COLUMN_TYPES.contains(typeName.toUpperCase());
+    }
+
     private String saveToTable(Connection connection, String tableToSave, String result) {
-        String query = "INSERT INTO " + tableToSave + " (result) VALUES (?)";
+        String query = "INSERT INTO `" + tableToSave + "` (result) VALUES (?)";
 
         try (
             PreparedStatement statement =
@@ -235,12 +305,21 @@ public abstract class Model {
     void saveToExcel(Connection connection) {
         checkQueries();
 
-        String tableName =
-            IO.readln("\nВведите название таблицы, которую вы хотите сохранить в Excel: ");
+        String tableName = chooseTableFromList(
+            findAllTables(connection),
+            "Нет таблиц для экспорта.",
+            "\nВыберите таблицу, которую вы хотите сохранить в Excel:"
+        );
+
+        if (tableName == null) {
+            return;
+        }
+
+        String selectQuery = "SELECT * FROM `" + tableName + "`";
 
         try (
             Statement statement = connection.createStatement();
-            ResultSet resultSet = statement.executeQuery("SELECT * FROM " + tableName);
+            ResultSet resultSet = statement.executeQuery(selectQuery);
             Workbook workbook = new XSSFWorkbook();
             FileOutputStream fos = new FileOutputStream("build/" + tableName + ".xlsx")
         ) {
