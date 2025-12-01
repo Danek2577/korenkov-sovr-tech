@@ -8,6 +8,9 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import java.io.FileOutputStream;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -22,6 +25,105 @@ public abstract class Model {
     private static final Set<String> NUMERIC_COLUMN_TYPES = Set.of(
         "BIGINT", "INT", "INTEGER", "SMALLINT", "MEDIUMINT", "TINYINT"
     );
+
+    public static final class TableBlueprint {
+        private final LinkedHashMap<String, String> columns;
+
+        private TableBlueprint(LinkedHashMap<String, String> columns) {
+            if (columns == null || columns.isEmpty()) {
+                throw new IllegalArgumentException("Необходимо определить хотя бы один столбец.");
+            }
+            this.columns = columns;
+        }
+
+        public LinkedHashMap<String, String> columns() {
+            return new LinkedHashMap<>(columns);
+        }
+
+        public Set<String> columnNames() {
+            return Collections.unmodifiableSet(columns.keySet());
+        }
+
+        public static Builder builder() {
+            return new Builder();
+        }
+
+        public static final class Builder {
+            private final LinkedHashMap<String, String> columns = new LinkedHashMap<>();
+
+            public Builder addColumn(String name, String definition) {
+                columns.put(name, definition);
+                return this;
+            }
+
+            public TableBlueprint build() {
+                return new TableBlueprint(new LinkedHashMap<>(columns));
+            }
+        }
+    }
+
+    protected record StructuredResult(
+        String preview,
+        String description,
+        LinkedHashMap<String, Object> columnValues,
+        Set<String> requiredColumns
+    ) { }
+
+    public static class StructuredResultBuilder {
+        private final LinkedHashMap<String, Object> columnValues = new LinkedHashMap<>();
+        private String preview;
+        private String description;
+        private Set<String> requiredColumns = Set.of("result");
+
+        public StructuredResultBuilder preview(String preview) {
+            this.preview = preview;
+            return this;
+        }
+
+        public StructuredResultBuilder description(String description) {
+            this.description = description;
+            return this;
+        }
+
+        public StructuredResultBuilder requiredColumns(Set<String> requiredColumns) {
+            if (requiredColumns != null && !requiredColumns.isEmpty()) {
+                this.requiredColumns = requiredColumns;
+            }
+            return this;
+        }
+
+        public StructuredResultBuilder put(String column, Object value) {
+            columnValues.put(column, value);
+            return this;
+        }
+
+        public StructuredResult build() {
+            if (preview == null || preview.isBlank()) {
+                throw new IllegalStateException("Не задан краткий результат для сохранения.");
+            }
+            if (description == null || description.isBlank()) {
+                throw new IllegalStateException("Не задано описание операции.");
+            }
+            if (columnValues.isEmpty()) {
+                throw new IllegalStateException("Не переданы значения столбцов для сохранения.");
+            }
+
+            Set<String> safeRequiredColumns = requiredColumns == null
+                ? Set.of("result")
+                : Set.copyOf(requiredColumns);
+
+            return new StructuredResult(
+                preview,
+                description,
+                new LinkedHashMap<>(columnValues),
+                safeRequiredColumns
+            );
+        }
+    }
+
+    protected StructuredResultBuilder structuredResultBuilder() {
+        return new StructuredResultBuilder();
+    }
 
     public abstract String getDescribeMessage();
     public abstract void showCommands();
@@ -78,6 +180,14 @@ public abstract class Model {
         }
     }
 
+    private void validateColumnName(String name) {
+        if (!IDENTIFIER_PATTERN.matcher(name).matches()) {
+            throw new IllegalArgumentException(
+                "Название столбца `" + name + "` должно содержать латинские символы и цифры и начинаться с буквы."
+            );
+        }
+    }
+
     void createTable(Connection connection, String resultType) {
         String tableName = readIdentifier("\nВведите название новой таблицы: ");
         String query = "CREATE TABLE IF NOT EXISTS `" + tableName + "` "
@@ -93,12 +203,53 @@ public abstract class Model {
         IO.println("Таблица создана.");
     }
 
+    void createTable(Connection connection, TableBlueprint blueprint) {
+        String tableName = readIdentifier("\nВведите название новой таблицы: ");
+        StringBuilder query = new StringBuilder("CREATE TABLE IF NOT EXISTS `")
+            .append(tableName)
+            .append("` (id int AUTO_INCREMENT PRIMARY KEY");
+
+        for (Map.Entry<String, String> column : blueprint.columns().entrySet()) {
+            String columnName = column.getKey();
+            validateColumnName(columnName);
+            query.append(", `")
+                .append(columnName)
+                .append("` ")
+                .append(column.getValue());
+        }
+
+        query.append(")");
+
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(query.toString());
+        } catch (SQLException e) {
+            System.err.println("Невозможно создать таблицу по шаблону.");
+            throw new RuntimeException(e);
+        }
+
+        IO.println("Таблица создана.");
+    }
+
     private String chooseTableToSave(Connection connection, String result) throws RuntimeException {
         ArrayList<String> possibleTablesToSave = findCorrectTables(connection);
 
         return chooseTableFromList(
             possibleTablesToSave,
             "Нет доступных таблиц для сохранения.",
+            "\nВыберите таблицу для сохранения результата `" + result + "`:"
+        );
+    }
+
+    private String chooseTableWithColumns(
+        Connection connection,
+        String result,
+        Set<String> requiredColumns
+    ) throws RuntimeException {
+        ArrayList<String> possibleTablesToSave = findTablesWithColumns(connection, requiredColumns);
+
+        return chooseTableFromList(
+            possibleTablesToSave,
+            "Нет подходящих таблиц для сохранения структурированных данных.",
             "\nВыберите таблицу для сохранения результата `" + result + "`:"
         );
     }
@@ -178,6 +329,36 @@ public abstract class Model {
         }
     }
 
+    private ArrayList<String> findTablesWithColumns(
+        Connection connection,
+        Set<String> requiredColumns
+    ) throws RuntimeException {
+        ArrayList<String> tablesList = new ArrayList<>();
+
+        try {
+            DatabaseMetaData metaData = connection.getMetaData();
+            try (
+                ResultSet tables =
+                    metaData.getTables(connection.getCatalog(), null, "%", new String[]{"TABLE"})
+            ) {
+                while (tables.next()) {
+                    String tableName = tables.getString("TABLE_NAME");
+
+                    if (hasCorrectPrimaryKey(metaData, tableName)
+                        && hasAllColumns(metaData, tableName, requiredColumns)
+                    ) {
+                        tablesList.add(tableName);
+                    }
+                }
+            }
+
+            return tablesList;
+        } catch (SQLException e) {
+            System.err.println("Невозможно получить список таблиц.");
+            throw new RuntimeException(e);
+        }
+    }
+
     private boolean isTableCorrect(DatabaseMetaData metaData, String tableName)
         throws RuntimeException
     {
@@ -223,6 +404,30 @@ public abstract class Model {
             return false;
         } catch (SQLException e) {
             System.err.println("Невозможно получить нужные столбцы.");
+            throw new RuntimeException(e);
+        }
+    }
+
+    private boolean hasAllColumns(
+        DatabaseMetaData metaData,
+        String tableName,
+        Set<String> requiredColumns
+    ) throws RuntimeException {
+        if (requiredColumns == null || requiredColumns.isEmpty()) {
+            return true;
+        }
+
+        try {
+            for (String column : requiredColumns) {
+                try (ResultSet columns = metaData.getColumns(null, null, tableName, column)) {
+                    if (!columns.next()) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (SQLException e) {
+            System.err.println("Невозможно проверить структуру таблицы.");
             throw new RuntimeException(e);
         }
     }
@@ -277,6 +482,76 @@ public abstract class Model {
         return null;
     }
 
+    private String saveStructuredRow(
+        Connection connection,
+        String tableToSave,
+        LinkedHashMap<String, Object> columnValues
+    ) {
+        if (columnValues.isEmpty()) {
+            return null;
+        }
+
+        columnValues.keySet().forEach(this::validateColumnName);
+
+        StringBuilder columnsBuilder = new StringBuilder();
+        StringBuilder placeholdersBuilder = new StringBuilder();
+        boolean first = true;
+
+        for (String column : columnValues.keySet()) {
+            if (!first) {
+                columnsBuilder.append(", ");
+                placeholdersBuilder.append(", ");
+            }
+            columnsBuilder.append("`").append(column).append("`");
+            placeholdersBuilder.append("?");
+            first = false;
+        }
+
+        String query = "INSERT INTO `" + tableToSave + "` (" + columnsBuilder + ") VALUES ("
+            + placeholdersBuilder + ")";
+
+        try (
+            PreparedStatement statement =
+                connection.prepareStatement(query, Statement.RETURN_GENERATED_KEYS)
+        ) {
+            int index = 1;
+            for (Object value : columnValues.values()) {
+                if (value == null) {
+                    statement.setObject(index++, null);
+                } else if (value instanceof Boolean bool) {
+                    statement.setBoolean(index++, bool);
+                } else if (value instanceof Integer integer) {
+                    statement.setInt(index++, integer);
+                } else if (value instanceof Long longValue) {
+                    statement.setLong(index++, longValue);
+                } else if (value instanceof Double doubleValue) {
+                    statement.setDouble(index++, doubleValue);
+                } else if (value instanceof String str) {
+                    statement.setString(index++, str);
+                } else {
+                    statement.setObject(index++, value);
+                }
+            }
+
+            int affectedRows = statement.executeUpdate();
+
+            if (affectedRows == 0) {
+                throw new SQLException();
+            }
+
+            try (ResultSet generatedKeys = statement.getGeneratedKeys()) {
+                if (generatedKeys.next()) {
+                    return generatedKeys.getString(1);
+                }
+            }
+        } catch (SQLException e) {
+            System.err.println("Не удалось сохранить структурированные данные.");
+            System.err.println("Сообщение: " + e.getMessage());
+        }
+
+        return null;
+    }
+
     void finishQuery(Connection connection, String result, String query) throws RuntimeException {
         String tableToSave = chooseTableToSave(connection, result);
 
@@ -287,6 +562,26 @@ public abstract class Model {
         String id = saveToTable(connection, tableToSave, result);
 
         savedQueries_.add(new SavedQuery(id, query, tableToSave));
+
+        IO.println("\nЗначение сохранено.");
+    }
+
+    protected void finishStructuredQuery(Connection connection, StructuredResult structuredResult)
+        throws RuntimeException
+    {
+        String tableToSave = chooseTableWithColumns(
+            connection,
+            structuredResult.preview(),
+            structuredResult.requiredColumns()
+        );
+
+        if (tableToSave == null) {
+            return;
+        }
+
+        String id = saveStructuredRow(connection, tableToSave, structuredResult.columnValues());
+
+        savedQueries_.add(new SavedQuery(id, structuredResult.description(), tableToSave));
 
         IO.println("\nЗначение сохранено.");
     }

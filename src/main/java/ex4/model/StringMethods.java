@@ -1,14 +1,33 @@
 package ex4.model;
 
 import common.Model;
+import common.Model.StructuredResult;
+import common.Model.StructuredResultBuilder;
+import common.Model.TableBlueprint;
 import static common.Model.IO;
 
 import java.sql.Connection;
+import java.util.Set;
 
 public class StringMethods extends Model {
     private String firstString = null;
     private String secondString = null;
     private static final int MIN_STRING_LENGTH = 50;
+    private static final TableBlueprint STRING_TABLE_BLUEPRINT = TableBlueprint.builder()
+        .addColumn("operation_code", "varchar(32) NOT NULL")
+        .addColumn("line_label", "varchar(32)")
+        .addColumn("first_value", "TEXT NOT NULL")
+        .addColumn("second_value", "TEXT")
+        .addColumn("result_value", "TEXT")
+        .addColumn("start_index", "INT")
+        .addColumn("end_index", "INT")
+        .addColumn("found_index", "INT")
+        .addColumn("ends_with", "TINYINT(1)")
+        .addColumn("lower_case", "TEXT")
+        .addColumn("upper_case", "TEXT")
+        .addColumn("operation_details", "TEXT")
+        .build();
+    private static final Set<String> REQUIRED_COLUMNS = STRING_TABLE_BLUEPRINT.columnNames();
 
     @Override
     public String getDescribeMessage() {
@@ -31,7 +50,7 @@ public class StringMethods extends Model {
         throws RuntimeException {
         switch (command) {
             case "1" -> showTables(connection);
-            case "2" -> createTable(connection, "TEXT");
+            case "2" -> createTable(connection, STRING_TABLE_BLUEPRINT);
             case "3" -> extractSubstring(connection);
             case "4" -> convertStringCase(connection);
             case "5" -> searchSubstringAndCheckEnding(connection);
@@ -49,8 +68,8 @@ public class StringMethods extends Model {
         IO.println("\nСтроки успешно введены:");
         showStoredStrings();
 
-        finishQuery(connection, firstString, "Первая строка: " + firstString);
-        finishQuery(connection, secondString, "Вторая строка: " + secondString);
+        saveStringSnapshot(connection, "первая", firstString);
+        saveStringSnapshot(connection, "вторая", secondString);
     }
 
     private String readStringWithMinLength(String ordinal, int minLength) {
@@ -129,9 +148,14 @@ public class StringMethods extends Model {
         IO.println("Извлеченная подстрока из " + ordinal + " строки: '" + substring + "'");
         IO.println("Индексы: с " + startIndex + " по " + endIndex);
 
-        finishQuery(
-            connection, substring,
-            "Подстрока '" + substring + "' из " + ordinal + " строки '" + str + "' (индексы: " + startIndex + "-" + endIndex + ")"
+        saveSubstringResult(
+            connection,
+            str,
+            substring,
+            startIndex,
+            endIndex,
+            ordinal,
+            num
         );
     }
 
@@ -153,8 +177,7 @@ public class StringMethods extends Model {
         IO.println("В нижнем регистре: '" + lower + "'");
         IO.println("В верхнем регистре: '" + upper + "'");
 
-        finishQuery(connection, lower, "Нижний регистр " + ordinal + " строки '" + str + "' -> '" + lower + "'");
-        finishQuery(connection, upper, "Верхний регистр " + ordinal + " строки '" + str + "' -> '" + upper + "'");
+        saveCaseResult(connection, str, ordinal, lower, upper);
     }
 
     private void searchSubstringAndCheckEnding(Connection connection) throws RuntimeException {
@@ -180,15 +203,150 @@ public class StringMethods extends Model {
             IO.println("Подстрока '" + searchSubstring + "' не найдена в " + ordinal + " строке '" + str + "'");
             IO.println(strName + " строка не заканчивается на указанную подстроку: false");
 
-            finishQuery(connection, "не найдено" + strNum, "Подстрока '" + searchSubstring + "' отсутствует в " + ordinal + " строке '" + str + "'");
-            finishQuery(connection, "false" + strNum, strName + " строка '" + str + "' не заканчивается на '" + searchSubstring + "'");
+            saveSearchResult(
+                connection,
+                str,
+                ordinal,
+                num,
+                searchSubstring,
+                foundIndex,
+                false
+            );
         } else {
             IO.println("Подстрока '" + searchSubstring + "' найдена в " + ordinal + " строке на позиции: " + foundIndex);
             IO.println(strName + " строка заканчивается на указанную подстроку: " + endsWith);
 
-            finishQuery(connection, foundIndex + strNum, "Подстрока '" + searchSubstring + "' найдена в " + ordinal + " строке '" + str + "' на позиции " + foundIndex);
-            finishQuery(connection, endsWith + strNum, strName + " строка '" + str + "' заканчивается на '" + searchSubstring + "': " + endsWith);
+            saveSearchResult(
+                connection,
+                str,
+                ordinal,
+                num,
+                searchSubstring,
+                foundIndex,
+                endsWith
+            );
         }
+    }
+
+    private void saveStringSnapshot(Connection connection, String label, String value)
+        throws RuntimeException
+    {
+        StructuredResult result = baseResultBuilder(
+            "Строка (" + label + ") сохранена",
+            "Значение " + label + " строки: " + value,
+            "INPUT",
+            label,
+            value
+        )
+            .put("result_value", value)
+            .build();
+
+        finishStructuredQuery(connection, result);
+    }
+
+    private void saveSubstringResult(
+        Connection connection,
+        String original,
+        String substring,
+        int startIndex,
+        int endIndex,
+        String ordinal,
+        int lineNum
+    ) throws RuntimeException {
+        String description = "Подстрока '" + substring + "' из " + ordinal + " строки '" + original
+            + "' (индексы: " + startIndex + "-" + endIndex + ")";
+
+        StructuredResult result = baseResultBuilder(
+            "Подстрока (" + ordinal + ") = '" + substring + "'",
+            description,
+            "SUBSTRING",
+            ordinal,
+            original
+        )
+            .put("result_value", substring)
+            .put("start_index", startIndex)
+            .put("end_index", endIndex)
+            .put("operation_details", "Строка " + lineNum + ", индексы " + startIndex + "-" + endIndex)
+            .build();
+
+        finishStructuredQuery(connection, result);
+    }
+
+    private void saveCaseResult(
+        Connection connection,
+        String original,
+        String ordinal,
+        String lower,
+        String upper
+    ) throws RuntimeException {
+        String description = "Регистр " + ordinal + " строки '" + original + "': нижний '" + lower
+            + "', верхний '" + upper + "'";
+
+        StructuredResult result = baseResultBuilder(
+            "Регистры (" + ordinal + ")",
+            description,
+            "CASE",
+            ordinal,
+            original
+        )
+            .put("lower_case", lower)
+            .put("upper_case", upper)
+            .put("result_value", lower)
+            .put("operation_details", "lower/upper для " + ordinal + " строки")
+            .build();
+
+        finishStructuredQuery(connection, result);
+    }
+
+    private void saveSearchResult(
+        Connection connection,
+        String original,
+        String ordinal,
+        int lineNum,
+        String searchSubstring,
+        int foundIndex,
+        boolean endsWith
+    ) throws RuntimeException {
+        String foundText = foundIndex >= 0
+            ? "найдена на позиции " + foundIndex
+            : "не найдена";
+        String description = "Подстрока '" + searchSubstring + "' " + foundText + " в " + ordinal + " строке.";
+
+        StructuredResultBuilder builder = baseResultBuilder(
+            "Поиск (" + ordinal + "): " + foundText,
+            description,
+            "SEARCH",
+            ordinal,
+            original
+        )
+            .put("second_value", searchSubstring)
+            .put("found_index", foundIndex >= 0 ? foundIndex : null)
+            .put("ends_with", endsWith)
+            .put("operation_details", "Строка " + lineNum + ": конец совпадает — " + endsWith);
+
+        if (foundIndex >= 0) {
+            builder.put("result_value", "найдено");
+        } else {
+            builder.put("result_value", "не найдено");
+        }
+
+        finishStructuredQuery(connection, builder.build());
+    }
+
+    private StructuredResultBuilder baseResultBuilder(
+        String preview,
+        String description,
+        String operationCode,
+        String lineLabel,
+        String sourceValue
+    ) {
+        return structuredResultBuilder()
+            .preview(preview)
+            .description(description)
+            .requiredColumns(REQUIRED_COLUMNS)
+            .put("operation_code", operationCode)
+            .put("line_label", lineLabel)
+            .put("first_value", sourceValue);
     }
 }
 
